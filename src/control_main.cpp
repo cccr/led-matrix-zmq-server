@@ -37,10 +37,19 @@ int main(int argc, char *argv[]) {
   set_brightness_command.add_argument("brightness")
       .help("Brightness level (0-255)")
       .scan<'i', int>();
+  set_brightness_command.add_argument("--transition")
+      .help("Transition time (ms) (0-65535)")
+      .default_value(0)
+      .scan<'i', int>();
+
   argparse::ArgumentParser set_temperature_command("set-temperature");
   set_temperature_command.add_description("Set the color temperature");
   set_temperature_command.add_argument("temperature")
-      .help("Temperature level (2000K-6500K)")
+      .help("Temperature (K) (2000-6500)")
+      .scan<'i', int>();
+  set_temperature_command.add_argument("--transition")
+      .help("Transition time (ms) (0-65535)")
+      .default_value(0)
       .scan<'i', int>();
 
   argparse::ArgumentParser get_brightness_command("get-brightness");
@@ -76,30 +85,38 @@ int main(int argc, char *argv[]) {
 
   if (program.is_subcommand_used(set_brightness_command)) {
     const auto brightness = set_brightness_command.get<int>("brightness");
-    PLOG_INFO << "Setting brightness to " << brightness << "";
+    const auto transition = set_brightness_command.get<int>("--transition");
+    PLOG_INFO << "Setting brightness to " << brightness << " with transition " << transition
+              << "ms";
 
     const lmz::SetBrightnessRequest control_req = {
-        .args = {.brightness = static_cast<uint8_t>(brightness)},
+        .args = {.brightness = static_cast<uint8_t>(brightness),
+                 .transition = static_cast<uint16_t>(transition)},
     };
 
     send_and_recv(sock, control_req);
   } else if (program.is_subcommand_used(set_temperature_command)) {
     const auto temperature = set_temperature_command.get<int>("temperature");
-    PLOG_INFO << "Setting temperature to " << temperature << "K";
+    const auto transition = set_temperature_command.get<int>("--transition");
+    PLOG_INFO << "Setting temperature to " << temperature << "K with transition " << transition
+              << "ms";
 
     const lmz::SetTemperatureRequest control_req = {
-        .args = {.temperature = static_cast<uint16_t>(temperature)},
+        .args = {.temperature = static_cast<uint16_t>(temperature),
+                 .transition = static_cast<uint16_t>(transition)},
     };
 
     send_and_recv(sock, control_req);
   } else if (program.is_subcommand_used(get_brightness_command)) {
     const auto resp_msg = send_and_recv(sock, lmz::GetBrightnessRequest{});
 
-    std::cout << std::to_string(resp_msg.args.brightness) << std::endl;
+    std::cout << "brightness: " << std::to_string(resp_msg.args.brightness) << std::endl;
+    std::cout << "transition: " << std::to_string(resp_msg.args.transition) << "ms" << std::endl;
   } else if (program.is_subcommand_used(get_temperature_command)) {
     const auto res_msg = send_and_recv(sock, lmz::GetTemperatureRequest{});
 
-    std::cout << std::to_string(res_msg.args.temperature) << std::endl;
+    std::cout << "temperature: " << std::to_string(res_msg.args.temperature) << "K" << std::endl;
+    std::cout << "transition: " << std::to_string(res_msg.args.transition) << "ms" << std::endl;
   } else if (program.is_subcommand_used(get_configuration_command)) {
     const auto res_msg = send_and_recv(sock, lmz::GetConfigurationRequest{});
 

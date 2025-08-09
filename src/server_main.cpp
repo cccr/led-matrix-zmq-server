@@ -1,3 +1,5 @@
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <thread>
@@ -128,6 +130,124 @@ static void loop() {
 
 } // namespace frame_task
 
+namespace transition_task {
+
+class Animation {
+private:
+  bool active = false;
+  int start_ = 0;
+  int target_ = 0;
+  std::chrono::steady_clock::time_point start_time;
+  std::chrono::milliseconds duration{0};
+
+public:
+  void start(int from, int to, std::chrono::milliseconds dur) {
+    start_ = from;
+    target_ = to;
+    duration = dur;
+    start_time = std::chrono::steady_clock::now();
+    active = true;
+  }
+
+  int current_value() const {
+    if (!active)
+      return target_;
+
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    if (elapsed >= duration) {
+      return target_;
+    }
+
+    float progress = static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()) / duration.count();
+    return start_ + static_cast<int>((target_ - start_) * progress);
+  }
+
+  bool is_active() const { return active; }
+
+  bool is_complete() const {
+    if (!active)
+      return true;
+    return std::chrono::steady_clock::now() - start_time >= duration;
+  }
+
+  void complete() { active = false; }
+
+  int target() const { return target_; }
+
+  uint16_t duration_ms() const { return static_cast<uint16_t>(duration.count()); }
+};
+
+std::mutex transition_mutex;
+std::condition_variable transition_cv;
+Animation brightness_animation;
+Animation temperature_animation;
+static int transition_hz = 30;
+
+static void set_brightness_transition(int brightness, uint16_t transition) {
+  {
+    const std::lock_guard<std::mutex> guard(transition_mutex);
+    if (transition == 0) {
+      frame_task::set_brightness(brightness);
+      return;
+    } else {
+      brightness_animation.start(frame_task::get_brightness(), brightness, std::chrono::milliseconds(transition));
+    }
+  }
+  transition_cv.notify_one();
+}
+
+static void set_temperature_transition(int temperature, uint16_t transition) {
+  {
+    const std::lock_guard<std::mutex> guard(transition_mutex);
+    if (transition == 0) {
+      frame_task::set_temperature(temperature);
+      return;
+    } else {
+      temperature_animation.start(frame_task::get_temperature(), temperature, std::chrono::milliseconds(transition));
+    }
+  }
+  transition_cv.notify_one();
+}
+
+static void loop() {
+  PLOG_INFO << "Transition task started";
+
+  while (true) {
+    std::unique_lock<std::mutex> lock(transition_mutex);
+
+    if (!brightness_animation.is_active() && !temperature_animation.is_active()) {
+      transition_cv.wait(lock);
+    }
+
+    if (brightness_animation.is_active()) {
+      int current = brightness_animation.current_value();
+      frame_task::set_brightness(current);
+
+      if (brightness_animation.is_complete()) {
+        brightness_animation.complete();
+      }
+    }
+
+    if (temperature_animation.is_active()) {
+      int current = temperature_animation.current_value();
+      frame_task::set_temperature(current);
+
+      if (temperature_animation.is_complete()) {
+        temperature_animation.complete();
+      }
+    }
+
+    lock.unlock();
+
+    // Sleep for next frame if any animations are still active
+    if (brightness_animation.is_active() || temperature_animation.is_active()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000 / transition_hz));
+    }
+  }
+}
+
+} // namespace transition_task
+
 namespace control_task {
 
 static std::string control_endpoint;
@@ -141,23 +261,44 @@ static lmz::MessageReplyType<RequestT> process_request(const RequestT &) {
 }
 
 template <> lmz::GetBrightnessReply process_request(const lmz::GetBrightnessRequest &) {
-  return lmz::GetBrightnessReply{
-      .args = {.brightness = static_cast<uint8_t>(frame_task::get_brightness())},
-  };
+  std::lock_guard<std::mutex> guard(transition_task::transition_mutex);
+
+  if (transition_task::brightness_animation.is_active()) {
+    return lmz::GetBrightnessReply{
+        .args = {.brightness = static_cast<uint8_t>(transition_task::brightness_animation.target()),
+                 .transition = transition_task::brightness_animation.duration_ms()},
+    };
+  } else {
+    return lmz::GetBrightnessReply{
+        .args = {.brightness = static_cast<uint8_t>(frame_task::get_brightness()), .transition = 0},
+    };
+  }
 }
 
 template <> lmz::NullReply process_request(const lmz::SetBrightnessRequest &req_msg) {
-  PLOG_INFO << "Setting brightness to " << std::to_string(req_msg.args.brightness) << "";
+  PLOG_INFO << "Setting brightness to " << std::to_string(req_msg.args.brightness)
+            << " with transition " << std::to_string(req_msg.args.transition) << "ms";
 
-  frame_task::set_brightness(req_msg.args.brightness);
+  transition_task::set_brightness_transition(req_msg.args.brightness, req_msg.args.transition);
 
   return lmz::NullReply{};
 }
 
 template <> lmz::GetTemperatureReply process_request(const lmz::GetTemperatureRequest &) {
-  return lmz::GetTemperatureReply{
-      .args = {.temperature = static_cast<uint16_t>(frame_task::get_temperature())},
-  };
+  std::lock_guard<std::mutex> guard(transition_task::transition_mutex);
+
+  if (transition_task::temperature_animation.is_active()) {
+    return lmz::GetTemperatureReply{
+        .args = {.temperature =
+                     static_cast<uint16_t>(transition_task::temperature_animation.target()),
+                 .transition = transition_task::temperature_animation.duration_ms()},
+    };
+  } else {
+    return lmz::GetTemperatureReply{
+        .args = {.temperature = static_cast<uint16_t>(frame_task::get_temperature()),
+                 .transition = 0},
+    };
+  }
 }
 
 template <> lmz::NullReply process_request(const lmz::SetTemperatureRequest &req_msg) {
@@ -165,9 +306,10 @@ template <> lmz::NullReply process_request(const lmz::SetTemperatureRequest &req
     PLOG_ERROR << "Received invalid temperature: " << req_msg.args.temperature << "K";
     return lmz::NullReply{};
   }
-  PLOG_INFO << "Setting temperature to " << std::to_string(req_msg.args.temperature) << "K";
+  PLOG_INFO << "Setting temperature to " << std::to_string(req_msg.args.temperature) << "K"
+            << " with transition " << std::to_string(req_msg.args.transition) << "ms";
 
-  frame_task::set_temperature(req_msg.args.temperature);
+  transition_task::set_temperature_transition(req_msg.args.temperature, req_msg.args.transition);
 
   return lmz::NullReply{};
 }
@@ -243,6 +385,11 @@ static void setup(int argc, char *argv[]) {
 
   parser.add_argument("--limit-hz").default_value(200).scan<'i', int>();
   parser.add_argument("--show-hz").default_value(false).implicit_value(true);
+
+  parser.add_argument("--transition-hz")
+      .help("Transition update rate in Hz (default: 100)")
+      .default_value(100)
+      .scan<'i', int>();
 
   parser.add_argument("--frame-endpoint").default_value(consts::default_frame_endpoint);
   parser.add_argument("--control-endpoint").default_value(consts::default_control_endpoint);
@@ -334,15 +481,22 @@ static void setup(int argc, char *argv[]) {
     using namespace control_task;
     control_endpoint = parser.get<std::string>("--control-endpoint");
   }
+
+  {
+    using namespace transition_task;
+    transition_hz = parser.get<int>("--transition-hz");
+  }
 }
 
 int main(int argc, char *argv[]) {
   setup(argc, argv);
 
   auto frame_thread = std::thread(frame_task::loop);
+  auto transition_thread = std::thread(transition_task::loop);
   auto control_thread = std::thread(control_task::loop);
 
   frame_thread.join();
+  transition_thread.join();
   control_thread.join();
 
   return 0;

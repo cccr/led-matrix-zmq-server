@@ -34,6 +34,7 @@ namespace {
 
   struct BrightnessArgs {
     uint8_t brightness;
+    uint16_t transition;
   };
 
   struct ConfigurationArgs {
@@ -43,6 +44,7 @@ namespace {
 
   struct TemperatureArgs {
     uint16_t temperature;
+    uint16_t transition;
   };
 
   template <MessageId Id, typename ArgsT = NullArgs> struct Message {

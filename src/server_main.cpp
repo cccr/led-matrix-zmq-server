@@ -257,7 +257,7 @@ zmq::socket_t sock(ctx, zmq::socket_type::rep);
 
 template <lmz::IsMessage RequestT>
 static lmz::MessageReplyType<RequestT> process_request(const RequestT &) {
-  static_assert(false, "No process implementation for this message");
+  static_assert(dependent_false_v<RequestT>, "No process implementation for this message");
 }
 
 template <> lmz::GetBrightnessReply process_request(const lmz::GetBrightnessRequest &) {

@@ -398,8 +398,11 @@ static void setup(int argc, char *argv[]) {
       .help("Initial brightness (0-255)")
       .default_value(255)
       .scan<'i', int>();
+
+  std::string help_str = "Initial color temperature (" + std::to_string(color_temp::min) +
+                       "-" + std::to_string(color_temp::max) + "K)";
   parser.add_argument("--temperature")
-      .help(std::format("Initial color temperature ({}-{}K)", color_temp::min, color_temp::max))
+      .help(help_str)
       .default_value(color_temp::max)
       .scan<'i', int>();
 

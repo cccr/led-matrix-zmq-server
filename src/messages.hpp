@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <type_traits>
 
+template<class> inline constexpr bool dependent_false_v = false;
+
 namespace lmz {
 
 enum class MessageId : std::uint8_t {
@@ -80,7 +82,7 @@ using GetConfigurationReply = Message<MessageId::GetConfigurationReply, Configur
 
 namespace {
   template <IsMessage MessageT> struct MessageRequestReply {
-    static_assert(false, "No reply type defined for this message");
+    static_assert(dependent_false_v<MessageT>, "No reply type defined for this message");
   };
 
   template <> struct MessageRequestReply<GetBrightnessRequest> {
